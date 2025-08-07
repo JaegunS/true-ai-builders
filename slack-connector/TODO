@@ -1,0 +1,3 @@
+1. Need a function for getting channel name form 
+2. Refactor to have hooks, and methods
+3. Implement Edits, Deletes, Threads
