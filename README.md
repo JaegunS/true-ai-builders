@@ -24,8 +24,7 @@ pnpm start
 src/
 ├── services/
 │   ├── news.ts        # RSS feeds, web search, email
-│   ├── profiles.ts    # LinkedIn scraping, RAG, templates
-│   └── operator.ts    # Website/GitHub discovery
+│   └── profiles.ts    # LinkedIn scraping, RAG, templates
 ├── utils/
 │   └── logger.ts      # Logging utility
 └── index.ts           # Main entry point
