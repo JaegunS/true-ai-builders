@@ -3,7 +3,6 @@ import threading
 from typing import Awaitable, Callable, Optional
 
 import discord
-from utils import get_channel_id_from_name_discord
 
 class DiscordHandler:
     """
@@ -41,17 +40,19 @@ class DiscordHandler:
             if self._on_message_callback is not None:
                 await self._on_message_callback(message, channel_name)
 
-    def set_on_message(self, callback: Callable[[discord.Message], Awaitable[None]]) -> None:
-        """Set an async callback invoked when a new message arrives in the target channel."""
+    def set_on_message(
+        self, callback: Callable[[discord.Message, str], Awaitable[None]]
+    ) -> None:
+        """Set an async callback invoked when a new message arrives in any channel."""
         self._on_message_callback = callback
 
     async def send_text(self, text: str, channel_name: str) -> None:
         """Send a message to the configured Discord channel."""
-        channel_id = get_channel_id_from_name_discord(channel_name)
-        channel = self.client.get_channel(channel_id)
-        
+        channel = discord.utils.get(self.client.get_all_channels(), name=channel_name)
+
         if channel is None:
-            channel = await self.client.fetch_channel(channel_name)
+            print(f"Channel '{channel_name}' not found; dropping message")
+            return
         await channel.send(text)  # type: ignore[arg-type]
 
     def schedule_send_text(self, text: str, channel_name: str) -> None:
