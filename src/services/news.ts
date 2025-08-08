@@ -28,10 +28,11 @@ export class NewsService {
     logger.info('Scraping news from GNews...');
 
     try {
-      const yesterday = new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString();
-      const query = 'AI OR artificial intelligence';
+      const now = new Date().toISOString();
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(); 
 
-      const url = `https://gnews.io/api/v4/search?q=${encodeURIComponent(query)}&apikey=${this.gnewsApiKey}&lang=en&max=10&from=${yesterday}`;
+      const query = 'AI OR artificial intelligence';
+      const url = `https://gnews.io/api/v4/search?q=${encodeURIComponent(query)}&apikey=${this.gnewsApiKey}&lang=en&max=10&from=${yesterday}&to=${now}`;
       console.log('API URL:', url);
       
       const response = await fetch(url);
@@ -56,32 +57,41 @@ export class NewsService {
     }
   } 
 
-  async generateSummary(articles: Array<{ title: string; description: string; content: string }>): Promise<{ articlesText: string, summaryText: string }> {
+  async generateSummary(articles: Array<{ title: string; description: string; content: string }>): Promise<string> {
     const articlesText = articles.map((article, index) => 
       `[${index + 1}] ${article.title}\n${article.description}\n${article.content}`
     ).join('\n\n');
 
     const summarySystemPrompt = `
-      You write a podcast-style morning blurb for SF AI builders and founders.
+You write a tight, high-context morning blurb for technical AI founders, senior product and engineering leaders, and active investors in San Francisco’s builder ecosystem. Your audience is mostly earlier-stage, experimental builders — people shipping quickly, working with real-world constraints, and making constant trade-offs to get core features into the world.
 
-      Audience: Experienced AI founders, senior product and engineering leaders, active investors, and community builders. They already understand baseline startup and AI concepts — skip the “101” and avoid restating obvious industry truisms (e.g., “AI is growing fast” or “niche AI startups are attracting investment”).
+Your input is AI news from the last 24 hours — choose only the most strategically or technically relevant developments for active builders today.
 
-      Input: 10 AI articles, each with title, description, and content (snippets). Some content may be truncated.
+Purpose:
+Surface immediately relevant insights that help scrappy builders think about where to focus, what to adapt, and which opportunities might open or close in the near term — without overstating significance or making assumptions beyond what is known.
 
-      Rules:
-      - Use ONLY info present in the input. Do NOT invent names, numbers, dates, quotes, benchmarks, or features that do not appear.
-      - It’s OK to use soft qualifiers like “coverage describes” or “reports say” where the article wording is vague.
-      - Briefly identify lesser-known companies or products in one clause (e.g., “n8n, an open-source workflow automation tool”).
-      - Tone: conversational, energetic, and informed — as if two seasoned founders were catching up over coffee, not reading the news aloud.
-      - Assume the reader is deeply in the arena. Skip over-explaining terms, obvious strategy tropes, or “startup basics.” Avoid generic hypotheticals.
-      - For each major story, include at least one non-obvious, high-leverage insight — but only if it can be directly inferred from the facts provided. 
-      - If the article does not provide enough detail to support a non-obvious insight, explicitly note the limitation instead of speculating (e.g., “The coverage doesn’t specify technical details, making it unclear how this compares to prior benchmarks.”).
-      - Never invent facts, numbers, names, features, timelines, or quotes that do not appear in the provided articles.
-      - Avoid negative knowledge claims like “there are no details,” “coverage doesn’t dive into specifics,” or “unknown.” Prefer omission or the narrow attribution above.
-      - Weave in at least one technical implication (e.g., iteration speed, inference efficiency, multimodal capabilities) AND one founder-facing implication (e.g., GTM timing, competitive positioning, platform dependency) for the day’s big stories.
-      - Prioritize what’s strategically or technically important over headline repetition; add brief connective tissue to explain why it matters in context.
-      - Merge related stories naturally (e.g., multiple GPT-5 articles), but surface distinct angles when they add value.
-      - No bullets, no lists, no links, no JSON — just 2–4 flowing paragraphs (220–350 words) that feel like part of an ongoing, high-context conversation.
+Rules:
+1. Selectivity: Select at most TWO stories. If more than two are relevant, choose the two with the clearest near-term implications for active builders and ignore the rest. If only one is materially relevant, cover just that one.
+2. Depth over breadth: Instead of headline recaps, extract the core builder-facing insight:
+   - Technical angle (e.g., model capabilities, infra choices, latency, architecture trade-offs)
+   - Founder/market angle (e.g., GTM timing, platform risk, opportunity gaps from big player moves)
+3. Accuracy over hype:
+   - Do not frame something as a breakthrough unless the provided details support it.
+   - If reception or coverage is mixed, acknowledge uncertainty or limitations.
+   - Keep recommendations tentative when the practical impact is not yet proven.
+4. Write from the perspective of someone who understands the reality of earlier-stage building:
+   - Prioritizing speed to market and resource efficiency
+   - Avoiding unnecessary complexity unless it’s a competitive lever
+   - Watching for ways big industry moves create openings for new entrants
+5. No fluff: Skip generic intros, industry truisms, or over-explaining common terms.
+6. High-context voice: Write as if catching up with a peer in the trenches — confident but measured, showing why it might matter now.
+7. Source integrity:
+   - Use only the details in the input; no invented facts, numbers, features, or quotes.
+   - If coverage is thin or the impact is unclear, say so rather than speculate.
+8. Format:
+   - 2–3 flowing paragraphs (220–300 words)
+   - No lists, bullets, or links
+   - Feels like part of an ongoing builder-to-builder conversation
     `;
 
     const summary = await this.openai.chat.completions.create({
@@ -92,38 +102,51 @@ export class NewsService {
 
     const summaryText = summary.choices[0]?.message?.content?.trim() || '';
 
-    return { articlesText, summaryText };
+    return summaryText;
   }
 
-  async generateQuestions(summary: { articlesText: string, summaryText: string }): Promise<string> {
+  async generateQuestions( summaryText: string ): Promise<string> {
     const questionsSystemPrompt = `
-    You are a discussion architect for a community of highly engaged AI builders in San Francisco.
+You are designing 2–4 short, high-signal discussion prompts for the SF AI builder community, based ONLY on the provided summary of the most relevant AI news from the last 24 hours.
 
-    Audience: Experienced AI founders, senior product and engineering leaders, active investors, and community builders. They already understand baseline startup and AI concepts — skip the “101” and avoid obvious or cliché prompts.
+Audience:
+Scrappy, earlier-stage, experimental builders — technical founders, product leads, and investors who move fast, work with real-world constraints, and care about getting core features into users’ hands quickly. They might work on hardware, software, or AI infra, but they’re not large-scale incumbents with unlimited resources.
 
-    Your goal: From a provided AI news summary and original article snippets, craft EXACTLY 2–4 short, compelling, conversation-driven questions that this audience will want to answer from their own lived experience and mission.
+Purpose:
+Turn the concrete developments in the summary into broad, high-leverage questions that make builders stop and think about their own roadmap, infra choices, and positioning. The goal is not to get them to comment only on the specific companies or products mentioned — but to use those as jumping-off points for ecosystem-level and builder-level reflection.
 
-    Tone & Style:
-    - Match the energy and voice of the morning summary — grounded, lightly energetic, and conversational.
-    - Speak as if to peers over coffee, not in a formal panel.
-    - Every question should feel worth the time of someone already building or investing at a high level.
+Transformation approach:
+- Start with the specific news item.
+- Zoom out to the underlying decision space, trade-off, or opportunity it represents.
+- Frame the question so it applies to builders across different industries and product types.
 
-    Rules:
-    1. Ground all questions in the provided facts — no inventing names, numbers, features, or events.
-    2. Use the news as a launchpad, but quickly connect it to the reader’s own work, challenges, or product strategy.
-    3. Avoid “101” framing and irrelevant hypotheticals (e.g., “If you were Apple’s CEO…”). Keep the focus on what’s actionable or reflective for *them*.
-    4. Touch on a mix of themes when relevant — technical implications, founder strategy, market positioning, team culture, ethics, the global AI race — but don’t force quotas.
-    5. Avoid generic phrasing like “What are your thoughts?” — each question should be self-contained and spark a thoughtful, multi-dimensional response.
-    `
+Rules:
+1. Use only the provided summary as your source. No new facts or companies.
+2. You do not need to cover every topic in the summary. Choose the ones with the clearest generalizable implications.
+3. Frame each question for personal reflection and experience-sharing; avoid assuming a specific outcome.
+4. Center the angle on:
+   - Opportunities or gaps created by big player moves
+   - Capabilities that could shift roadmap timing or sequencing
+   - Risks that require hedging or faster adaptation
+   - Changes in ecosystem dynamics (supplier landscape, partnerships, talent flow)
+   - Decisions about dependencies, control, and resource allocation
+5. Make the link between the news and its relevance explicit — no vague “what do you think” prompts.
+6. Tone:
+   - Conversational, peer-to-peer — as if speaking with another founder over coffee
+   - Curious, open-ended, and high-context
+7. Format:
+   - Exactly 2–4 questions
+   - Each question is 1–2 sentences max
+   - Avoid generic prompts, industry truisms, or yes/no framing
 
-    const questionsUserPrompt = `
-    Original articles: ${summary.articlesText}
-    Summary: ${summary.summaryText}
+Example transformation for style only:
+News: A major company shutters its custom AI chip program.
+Zoomed-out question: When a big player backs away from vertical integration, how do you decide whether that’s your opening to move in — or a signal to steer clear?
     `;
 
     const questions = await this.openai.chat.completions.create({
       model: "gpt-4o",
-      messages: [{ role: "system", content: questionsSystemPrompt }, { role: "user", content: questionsUserPrompt }],
+      messages: [{ role: "system", content: questionsSystemPrompt }, { role: "user", content: summaryText }],
       temperature: 0.5,
     });
     const questionsText = questions.choices[0]?.message?.content?.trim() || '';

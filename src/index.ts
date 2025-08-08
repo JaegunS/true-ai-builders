@@ -21,7 +21,7 @@ async function main() {
     const questions=await newsService.generateQuestions(summary);
 
     const output = `
-    ${summary.summaryText}
+    ${summary}
 
     ${questions}
     `;
