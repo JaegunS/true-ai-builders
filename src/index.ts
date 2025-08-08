@@ -14,6 +14,20 @@ async function main() {
     const profileService = new ProfileService();
     
     logger.info('✅ All services initialized');
+    
+    // Test the news scraping
+    const articles=await newsService.scrapeNews();
+    const summary=await newsService.generateSummary(articles);
+    const questions=await newsService.generateQuestions(summary);
+
+    const output = `
+    ${summary.summaryText}
+
+    ${questions}
+    `;
+
+    logger.info(output);
+
     logger.info('📝 Ready to implement logic!');
     
   } catch (error) {
