@@ -117,11 +117,9 @@ class DiscordHandler:
             print(f"Channel '{channel_name}' does not support history; cannot delete message")
             return
         
-        print("real text", text)
         try:
             async for message in channel.history(limit=self.message_read_limit):  # type: ignore[attr-defined]
                 if text in (getattr(message, "content", "") or ""):
-                    print(text)
                     try:
                         await message.delete()
                         return
