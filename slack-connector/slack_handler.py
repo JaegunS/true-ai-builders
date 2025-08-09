@@ -26,6 +26,9 @@ class SlackHandler:
 
         self._on_message_callback: Optional[Callable[[str, str, str], Awaitable[None]]] = None
         self._on_delete_callback: Optional[Callable[[str, str, str], Awaitable[None]]] = None
+        self._on_edit_callback: Optional[Callable[[str, str, str, str], Awaitable[None]]] = None
+
+    # --- Set up callbacks ---
 
     def set_on_message(
         self, callback: Callable[[str, str, str], Awaitable[None]]
@@ -36,8 +39,16 @@ class SlackHandler:
     def set_on_delete(
         self, callback: Callable[[str, str, str], Awaitable[None]]
     ) -> None:
-        """Set an async callback invoked when a new message arrives in any channel."""
+        """Set an async callback invoked when a new message is deleted in any channel."""
         self._on_delete_callback = callback
+
+    def set_on_edit(
+        self, callback: Callable[[str, str, str, str], Awaitable[None]]
+    ) -> None:
+        """Set an async callback invoked when a new message is edited in any channel."""
+        self._on_edit_callback = callback
+
+    # --- Set up the actual functions ---
 
     async def send_text(self, text: str, channel_name: str) -> None:
         try:
@@ -53,8 +64,31 @@ class SlackHandler:
             for msg in resp.get("messages", []):
                 if text in msg.get("text", ""):
                     await self.async_client.chat_delete(channel=channel_id, ts=msg["ts"])
+                    return
         except SlackApiError as e:
             print(f"Slack error while deleting: {e}")
+
+    async def edit_text(self, old_text: str, new_text: str, channel_name: str) -> None:
+        try:
+            channel_id = await get_channel_id_from_name_slack(channel_name, self.async_client)
+            resp = await self.async_client.conversations_history(channel=channel_id, limit=self.message_read_limit)
+            for msg in resp.get("messages", []):
+                if old_text in msg.get("text", ""):
+                    try:
+                        await self.async_client.chat_update(
+                            channel=channel_id,
+                            ts=msg["ts"],
+                            text=new_text,
+                        )
+                        return
+                    except SlackApiError as e:
+                        print(f"Slack error while editing: {e}")
+                    finally:
+                        break
+        except SlackApiError as e:
+            print(f"Slack error while editing: {e}")
+
+    # --- Socket Mode event loop ---
 
     async def _socket_mode_loop(self) -> None:
         self._socket_client = SocketModeClient(
@@ -73,11 +107,12 @@ class SlackHandler:
                     text = event.get("text", "")
                     channel = event.get("channel", "")
                     
-                    # If slack message is a deletion
+                    # delete a message
                     if event.get("subtype") == "message_deleted":
                         
                         # Bot deletion event
                         user_id = event.get("previous_message").get("user")
+                        text = event.get("previous_message").get("text")
 
                         # Check if the previous code was sent by a bot
                         # Cheeky bastard code
@@ -86,6 +121,19 @@ class SlackHandler:
                         
                         if self._on_delete_callback:
                             await self._on_delete_callback(user_id, text, channel)
+                    # edit a message
+                    elif event.get("subtype") == "message_changed":
+                        previous_text = event.get("previous_message", {}).get("text", "")
+                        new_text = event.get("message", {}).get("text", "")
+                        # Try to resolve the editing user from nested payload
+                        user_id = (
+                            event.get("message", {}).get("user")
+                            or event.get("previous_message", {}).get("user")
+                            or user_id
+                        )
+                        if self._on_edit_callback:
+                            await self._on_edit_callback(user_id, previous_text, new_text, channel)
+                    # send a message
                     else:
                         if self._on_message_callback:
                             await self._on_message_callback(user_id, text, channel)
@@ -98,6 +146,8 @@ class SlackHandler:
 
         # sleep forever to keep the task alive
         await asyncio.Future()
+
+    # --- Start listening ---
 
     def start_listening(self) -> None:
         try:

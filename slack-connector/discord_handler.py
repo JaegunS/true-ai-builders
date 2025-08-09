@@ -22,6 +22,7 @@ class DiscordHandler:
 
         self._on_message_callback: Optional[Callable[[discord.Message, str], Awaitable[None]]] = None
         self._on_delete_callback: Optional[Callable[[discord.Message, str], Awaitable[None]]] = None
+        self._on_edit_callback: Optional[Callable[[discord.Message, discord.Message, str], Awaitable[None]]] = None
 
         self._register_events()
 
@@ -58,8 +59,21 @@ class DiscordHandler:
             if self._on_delete_callback is not None:
                 await self._on_delete_callback(message, channel_name)
 
+        @self.client.event
+        async def on_message_edit(before: discord.Message, after: discord.Message) -> None:  # type: ignore
+            # Ignore our own bot edits to avoid feedback loops
+            try:
+                if after.author == self.client.user:
+                    return
+            except Exception:
+                pass
 
-    # Set this up from here 
+            channel_name = getattr(getattr(after, "channel", None), "name", "unknown")
+            if self._on_edit_callback is not None:
+                await self._on_edit_callback(before, after, channel_name)
+
+
+    # --- Set up callbacks ---
 
     def set_on_message(
         self, callback: Callable[[discord.Message, str], Awaitable[None]]
@@ -72,6 +86,14 @@ class DiscordHandler:
     ) -> None:
         """Set an async callback invoked when a message is deleted in any channel."""
         self._on_delete_callback = callback
+
+    def set_on_edit(
+        self, callback: Callable[[discord.Message, discord.Message, str], Awaitable[None]]
+    ) -> None:
+        """Set an async callback invoked when a message is edited in any channel."""
+        self._on_edit_callback = callback
+
+    # --- Set up the actual functions ---
 
     async def send_text(self, text: str, channel_name: str) -> None:
         """Send a message to the configured Discord channel."""
@@ -94,16 +116,52 @@ class DiscordHandler:
         if not hasattr(channel, "history"):
             print(f"Channel '{channel_name}' does not support history; cannot delete message")
             return
-
+        
+        print("real text", text)
         try:
             async for message in channel.history(limit=self.message_read_limit):  # type: ignore[attr-defined]
                 if text in (getattr(message, "content", "") or ""):
+                    print(text)
                     try:
                         await message.delete()
+                        return
                     except Exception as e:
                         print(f"Error deleting message in '{channel_name}': {e}")
         except Exception as e:
             print(f"Error fetching history for '{channel_name}': {e}")
+
+    async def edit_text(self, old_text: str, new_text: str, channel_name: str) -> None:
+        """Edit the most recent bot-authored message containing old_text to new_text."""
+        channel = discord.utils.get(self.client.get_all_channels(), name=channel_name)
+
+        if channel is None:
+            print(f"Channel '{channel_name}' not found; cannot edit message")
+            return
+
+        if not hasattr(channel, "history"):
+            print(f"Channel '{channel_name}' does not support history; cannot edit message")
+            return
+
+        try:
+            async for message in channel.history(limit=self.message_read_limit):  # type: ignore[attr-defined]
+                content = getattr(message, "content", "") or ""
+                if old_text in content:
+                    # Only attempt to edit messages authored by this bot
+                    try:
+                        if getattr(message, "author", None) == self.client.user:
+                            await message.edit(content=new_text)
+                            return
+                        else:
+                            # Not our message; skip
+                            pass
+                    except Exception as e:
+                        print(f"Error editing message in '{channel_name}': {e}")
+                    finally:
+                        break
+        except Exception as e:
+            print(f"Error fetching history for '{channel_name}': {e}")
+
+    # --- Schedule discord events --- #
 
     def schedule_send_text(self, text: str, channel_name: str) -> None:
         """
@@ -120,6 +178,13 @@ class DiscordHandler:
             print("Discord event loop not ready; cannot delete message")
             return
         asyncio.run_coroutine_threadsafe(self.delete_text(text, channel_name), self.loop)
+
+    def schedule_edit_text(self, old_text: str, new_text: str, channel_name: str) -> None:
+        """Schedule editing of a message from another thread."""
+        if self.loop is None:
+            print("Discord event loop not ready; cannot edit message")
+            return
+        asyncio.run_coroutine_threadsafe(self.edit_text(old_text, new_text, channel_name), self.loop)
 
     def run(self) -> None:
         """Run the Discord client (blocking)."""

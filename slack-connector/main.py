@@ -59,6 +59,15 @@ def main() -> None:
 
     discord_side.set_on_delete(on_discord_delete)
 
+    # Bridge: Discord -> Slack (edit)
+    async def on_discord_edit(before: discord.Message, after: discord.Message, channel_name: str) -> None:
+        author_name = after.author.name
+        old_formatted = f"[From Discord] {author_name}: {before.content}"
+        new_formatted = f"[From Discord] {author_name}: {after.content}"
+        await slack_side.edit_text(old_formatted, new_formatted, channel_name)
+
+    discord_side.set_on_edit(on_discord_edit)
+
     # Bridge: Slack -> Discord
     async def on_slack_message(user_id: str, text: str, channel_id: str) -> None:
         user_name = await get_user_name_slack(user_id=user_id, client=slack_side.async_client)
@@ -74,23 +83,32 @@ def main() -> None:
     slack_side.set_on_message(on_slack_message)
 
     async def on_slack_delete(user_id: str, text: str, channel_id: str) -> None:
-        # Not implemented yet for Discord side. Placeholder to satisfy linter.
         user_name = await get_user_name_slack(user_id=user_id, client=slack_side.async_client)
         channel_name = await get_channel_name_slack(
             channel_id=channel_id,
             client=slack_side.async_client,
             dm_fallback_user_name=user_name,
         )
+
         discord_message_text = f"[From Slack] {user_name}: {text}"
         # Schedule deletion on the Discord event loop
+
         discord_side.schedule_delete_text(discord_message_text, channel_name)
 
     slack_side.set_on_delete(on_slack_delete)
 
+    async def on_slack_edit(user_id: str, old_text: str, new_text: str, channel_id: str) -> None:
+        user_name = await get_user_name_slack(user_id=user_id, client=slack_side.async_client)
+        channel_name = await get_channel_name_slack(
+            channel_id=channel_id,
+            client=slack_side.async_client,
+            dm_fallback_user_name=user_name,
+        )
+        old_formatted = f"[From Slack] {user_name}: {old_text}"
+        new_formatted = f"[From Slack] {user_name}: {new_text}"
+        discord_side.schedule_edit_text(old_formatted, new_formatted, channel_name)
 
-
-
-
+    slack_side.set_on_edit(on_slack_edit)
 
     # Start Slack Socket Mode after Discord is ready
     def start_slack():
