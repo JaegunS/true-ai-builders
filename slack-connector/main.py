@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 from discord_handler import DiscordHandler
 from slack_handler import SlackHandler
-from slack_sdk.errors import SlackApiError
+from utils import get_user_name_slack, get_channel_name_slack
 import discord
 
 load_dotenv()
@@ -30,13 +30,16 @@ if _missing:
     )
 
 def main() -> None:
-    discord_side = DiscordHandler(token=DISCORD_TOKEN)
+    # Rename lol
+    message_read_limit = 200
+    discord_side = DiscordHandler(token=DISCORD_TOKEN, message_read_limit=message_read_limit)
     slack_side = SlackHandler(
         bot_token=SLACK_TOKEN,
         app_token=SLACK_APP_TOKEN,
+        message_read_limit=message_read_limit, 
     )
 
-    # Bridge: Discord -> Slack
+    # Bridge: Discord -> Slack (create)
     async def on_discord_message(message: discord.Message, channel_name: str) -> None:
         author_name = message.author.name
         content = message.content
@@ -45,38 +48,67 @@ def main() -> None:
 
     discord_side.set_on_message(on_discord_message)
 
+    # Bridge: Discord -> Slack (delete)
+    async def on_discord_delete(message: discord.Message, channel_name: str) -> None:
+        author_name = message.author.name
+        content = message.content
+        # Refactor this
+        slack_message_text = f"[From Discord] {author_name}: {content}"
+        await slack_side.delete_text(slack_message_text, channel_name)
+
+
+    discord_side.set_on_delete(on_discord_delete)
+
+    # Bridge: Discord -> Slack (edit)
+    async def on_discord_edit(before: discord.Message, after: discord.Message, channel_name: str) -> None:
+        author_name = after.author.name
+        old_formatted = f"[From Discord] {author_name}: {before.content}"
+        new_formatted = f"[From Discord] {author_name}: {after.content}"
+        await slack_side.edit_text(old_formatted, new_formatted, channel_name)
+
+    discord_side.set_on_edit(on_discord_edit)
+
     # Bridge: Slack -> Discord
     async def on_slack_message(user_id: str, text: str, channel_id: str) -> None:
-        # pull username
-        try:
-            user_info = await slack_side.async_client.users_info(user=user_id)
-            if user_info.get("ok"):
-                user_name = user_info["user"].get("name", "unknown")
-            else:
-                user_name = "unknown"
-        except SlackApiError as e:
-            print(f"Slack API error getting user info: {e}")
-            user_name = "unknown"
-
-        # pull channel name
-        try:
-            channel_info = await slack_side.async_client.conversations_info(channel=channel_id)
-            if channel_info.get("ok"):
-                channel_obj = channel_info["channel"]
-                channel_name = channel_obj.get("name")
-                if not channel_name and channel_obj.get("is_im"):
-                    channel_name = user_name  # DM fallback
-            else:
-                channel_name = "unknown"
-        except SlackApiError as e:
-            print(f"Slack API error getting channel info: {e}")
-            channel_name = "unknown"
-
+        user_name = await get_user_name_slack(user_id=user_id, client=slack_side.async_client)
+        channel_name = await get_channel_name_slack(
+            channel_id=channel_id,
+            client=slack_side.async_client,
+            dm_fallback_user_name=user_name,
+        )
         formatted = f"[From Slack] {user_name}: {text}"
         discord_side.schedule_send_text(formatted, channel_name=channel_name)
 
 
     slack_side.set_on_message(on_slack_message)
+
+    async def on_slack_delete(user_id: str, text: str, channel_id: str) -> None:
+        user_name = await get_user_name_slack(user_id=user_id, client=slack_side.async_client)
+        channel_name = await get_channel_name_slack(
+            channel_id=channel_id,
+            client=slack_side.async_client,
+            dm_fallback_user_name=user_name,
+        )
+
+        discord_message_text = f"[From Slack] {user_name}: {text}"
+        # Schedule deletion on the Discord event loop
+
+        discord_side.schedule_delete_text(discord_message_text, channel_name)
+
+    slack_side.set_on_delete(on_slack_delete)
+
+    async def on_slack_edit(user_id: str, old_text: str, new_text: str, channel_id: str) -> None:
+        user_name = await get_user_name_slack(user_id=user_id, client=slack_side.async_client)
+        channel_name = await get_channel_name_slack(
+            channel_id=channel_id,
+            client=slack_side.async_client,
+            dm_fallback_user_name=user_name,
+        )
+        old_formatted = f"[From Slack] {user_name}: {old_text}"
+        new_formatted = f"[From Slack] {user_name}: {new_text}"
+        discord_side.schedule_edit_text(old_formatted, new_formatted, channel_name)
+
+    slack_side.set_on_edit(on_slack_edit)
 
     # Start Slack Socket Mode after Discord is ready
     def start_slack():
