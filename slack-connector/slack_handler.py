@@ -9,7 +9,7 @@ from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 
-from utils import get_channel_id_from_name_slack
+from utils import get_channel_id_from_name_slack, is_slack_bot_event
 
 
 class SlackHandler:
@@ -50,35 +50,88 @@ class SlackHandler:
 
     # --- Set up the actual functions ---
 
-    async def send_text(self, text: str, channel_name: str) -> None:
+    async def send_text(self, message_content: str, author_name: str, channel_name: str, message_text: str = None) -> None:
+        if message_text is not None:
+            # If message_text is provided, find the message and reply to it
+            await self.send_reply(message_content, channel_name, message_text, author_name)
+        else:
+            try:
+                channel_id = await get_channel_id_from_name_slack(channel_name, self.async_client)
+                # Format the message with author attribution
+                formatted_message = f"[From Discord] {author_name}: {message_content}"
+                await self.async_client.chat_postMessage(channel=channel_id, text=formatted_message)
+            except SlackApiError as e:
+                print(f"Slack error while sending: {e}")
+
+    async def send_reply(self, reply_text: str, channel_name: str, message_text: str, author_name: str) -> None:
+        """
+        Find a message containing the specified text and send a reply to it.
+        
+        Args:
+            reply_text: The text to send as a reply
+            channel_name: The name of the channel to search in
+            message_text: The text to search for in existing messages
+        """
+        # Find starting index for the author
+        if message_text.startswith("[From Slack]"):
+            message_text = "".join(message_text.split(":")[1:]).strip()
+
         try:
             channel_id = await get_channel_id_from_name_slack(channel_name, self.async_client)
-            await self.async_client.chat_postMessage(channel=channel_id, text=text)
-        except SlackApiError as e:
-            print(f"Slack error while sending: {e}")
+            
+            # Search for the message to reply to
+            resp = await self.async_client.conversations_history(channel=channel_id, limit=self.message_read_limit)
+            
+            for msg in resp.get("messages", []):
+                if message_text in msg.get("text", ""):
+                    # Found the message, send a reply using thread_ts
+                    await self.async_client.chat_postMessage(
+                        channel=channel_id,
+                        text=reply_text,
+                        thread_ts=msg["ts"]  # This creates a thread reply
+                    )
+                    return
 
-    async def delete_text(self, text: str, channel_name: str) -> None:
+            print("Slack sent nothing?")
+
+        except SlackApiError as e:
+            print(f"Slack error while sending reply: {e}")
+        except Exception as e:
+            print(f"Unexpected error while sending reply: {e}")
+
+    async def delete_text(self, message_content: str, author_name: str, channel_name: str) -> None:
+        """Delete recent messages in a Slack channel that match the author and content."""
         try:
             channel_id = await get_channel_id_from_name_slack(channel_name, self.async_client)
             resp = await self.async_client.conversations_history(channel=channel_id, limit=self.message_read_limit)
+            
             for msg in resp.get("messages", []):
-                if text in msg.get("text", ""):
+                msg_text = msg.get("text", "")
+                # Check if message content matches and format matches our expected pattern
+                expected_format = f"[From Discord] {author_name}: {message_content}"
+                if expected_format in msg_text:
                     await self.async_client.chat_delete(channel=channel_id, ts=msg["ts"])
                     return
         except SlackApiError as e:
             print(f"Slack error while deleting: {e}")
 
-    async def edit_text(self, old_text: str, new_text: str, channel_name: str) -> None:
+    async def edit_text(self, old_content: str, new_content: str, author_name: str, channel_name: str) -> None:
+        """Edit the most recent message from the specified author containing old_content."""
         try:
             channel_id = await get_channel_id_from_name_slack(channel_name, self.async_client)
             resp = await self.async_client.conversations_history(channel=channel_id, limit=self.message_read_limit)
+            
             for msg in resp.get("messages", []):
-                if old_text in msg.get("text", ""):
+                msg_text = msg.get("text", "")
+                # Check if message content matches and format matches our expected pattern
+                expected_old_format = f"[From Discord] {author_name}: {old_content}"
+                if expected_old_format in msg_text:
                     try:
+                        new_formatted = f"[From Discord] {author_name}: {new_content}"
                         await self.async_client.chat_update(
                             channel=channel_id,
                             ts=msg["ts"],
-                            text=new_text,
+                            text=new_formatted,
                         )
                         return
                     except SlackApiError as e:
@@ -101,12 +154,18 @@ class SlackHandler:
 
             if req.type == "events_api":
                 event = req.payload.get("event", {})
-                if event.get("type") == "message" and "bot_id" not in event:
+                if event.get("type") == "message":
+                    # Ignore bot-authored messages (including edits/deletions by bots)
+                    if is_slack_bot_event(event):
+                        return
 
                     user_id = event.get("user", "unknown")
                     text = event.get("text", "")
                     channel = event.get("channel", "")
-                    
+                    thread_ts = event["ts"]
+                    #resp = client.conversations_history(channel=channel, latest=thread_ts, inclusive=True, limit=1)
+                    #print(resp)
+
                     # delete a message
                     if event.get("subtype") == "message_deleted":
                         

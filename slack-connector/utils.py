@@ -1,9 +1,13 @@
 from typing import Optional
+import discord
 
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.errors import SlackApiError
 
 _channel_cache: dict[str, str] = {}  # name → id
+
+
+
 
 async def get_channel_id_from_name_slack(
     channel_name: str,
@@ -37,8 +41,6 @@ async def get_channel_id_from_name_slack(
         raise RuntimeError(f"Slack API error while finding channel '{channel_name}': {e}")
 
     raise ValueError(f"Channel '{channel_name}' not found on Slack workspace")
-
-
 
 async def get_user_name_slack(user_id: str, client: AsyncWebClient) -> str:
     """Resolve a Slack user's display name.
@@ -76,3 +78,51 @@ async def get_channel_name_slack(
     except SlackApiError as e:
         print(f"Slack API error getting channel info: {e}")
     return "unknown"
+
+
+def is_slack_bot_event(event: dict) -> bool:
+    """
+    Return True if a Slack event payload represents a bot-authored message.
+
+    Checks both top-level and nested message objects found in edits/deletions.
+    """
+    if not isinstance(event, dict):
+        return False
+
+    # Direct bot indicator on the event
+    if event.get("bot_id") is not None:
+        return True
+    if event.get("subtype") == "bot_message":
+        return True
+
+    # Nested message (e.g., message_changed)
+    message = event.get("message") or {}
+    if isinstance(message, dict):
+        if message.get("bot_id") is not None:
+            return True
+        if message.get("subtype") == "bot_message":
+            return True
+
+    # Previous message (e.g., message_deleted)
+    previous_message = event.get("previous_message") or {}
+    if isinstance(previous_message, dict):
+        if previous_message.get("bot_id") is not None:
+            return True
+        if previous_message.get("subtype") == "bot_message":
+            return True
+
+    return False
+
+
+def is_discord_bot_message(message: discord.Message) -> bool:
+    """
+    Return True if a Discord message was authored by a bot account.
+    """
+    try:
+        author = getattr(message, "author", None)
+        if author is None:
+            return False
+        return bool(getattr(author, "bot", False))
+    except Exception:
+        # Be conservative and do not treat as bot on errors
+        return False

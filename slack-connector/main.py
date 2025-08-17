@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 from discord_handler import DiscordHandler
 from slack_handler import SlackHandler
-from utils import get_user_name_slack, get_channel_name_slack
+from utils import get_user_name_slack, get_channel_name_slack, is_discord_bot_message
 import discord
 
 load_dotenv()
@@ -39,28 +39,53 @@ def main() -> None:
         message_read_limit=message_read_limit, 
     )
 
+    
+
     # Bridge: Discord -> Slack (create)
     async def on_discord_message(message: discord.Message, channel_name: str) -> None:
-        author_name = message.author.name
+        # Extract message content and author name
         content = message.content
-        slack_message_text = f"[From Discord] {author_name}: {content}"
-        # Check if it is a reply
-        await slack_side.send_text(slack_message_text, channel_name)
+        author_name = message.author.name
+
+        if message.reference:
+            try:
+                replied_message = await message.channel.fetch_message(message.reference.message_id)
+
+                # check if the message was sent by a bot
+                if is_discord_bot_message(replied_message):
+                    # If the replied message is from a bot, we need to construct the search text
+                    # Look for the bot's message content in the channel
+                    message_to_reply = replied_message.content
+                else:
+                    author_name = replied_message.author.name
+                    content = replied_message.content
+                    message_to_reply = f"[From Discord] {author_name}: {content}"
+
+                # Send as a reply to the specific message
+                await slack_side.send_text(content, author_name, channel_name, message_to_reply)
+            except Exception as e:
+                print(f"Error handling Discord reply: {e}")
+                # Fallback to regular message if reply handling fails
+                await slack_side.send_text(content, author_name, channel_name)
+        else:
+            # Not a reply, send as regular message
+            await slack_side.send_text(content, author_name, channel_name)
 
     # Bridge: Discord -> Slack (delete)
     async def on_discord_delete(message: discord.Message, channel_name: str) -> None:
         author_name = message.author.name
         content = message.content
         # Refactor this
-        slack_message_text = f"[From Discord] {author_name}: {content}"
-        await slack_side.delete_text(slack_message_text, channel_name)
+        # OLD: slack_message_text = f"[From Discord] {author_name}: {content}"
+        await slack_side.delete_text(content, author_name, channel_name)
 
     # Bridge: Discord -> Slack (edit)
     async def on_discord_edit(before: discord.Message, after: discord.Message, channel_name: str) -> None:
         author_name = after.author.name
-        old_formatted = f"[From Discord] {author_name}: {before.content}"
-        new_formatted = f"[From Discord] {author_name}: {after.content}"
-        await slack_side.edit_text(old_formatted, new_formatted, channel_name)
+        old_content = before.content
+        new_content = after.content
+
+        await slack_side.edit_text(old_content, new_content, author_name, channel_name)
 
     discord_side.set_on_message(on_discord_message)
     discord_side.set_on_delete(on_discord_delete)
@@ -74,9 +99,9 @@ def main() -> None:
             client=slack_side.async_client,
             dm_fallback_user_name=user_name,
         )
-        formatted = f"[From Slack] {user_name}: {text}"
-        # Check if it is a reply
-        discord_side.schedule_send_text(formatted, channel_name=channel_name)
+        
+        # Pass message content and author separately instead of formatted string
+        discord_side.schedule_send_text(text, user_name, channel_name)
 
     async def on_slack_delete(user_id: str, text: str, channel_id: str) -> None:
         user_name = await get_user_name_slack(user_id=user_id, client=slack_side.async_client)
@@ -86,10 +111,8 @@ def main() -> None:
             dm_fallback_user_name=user_name,
         )
 
-        discord_message_text = f"[From Slack] {user_name}: {text}"
-        # Schedule deletion on the Discord event loop
-
-        discord_side.schedule_delete_text(discord_message_text, channel_name)
+        # Pass message content and author separately instead of formatted string
+        discord_side.schedule_delete_text(text, user_name, channel_name)
 
     async def on_slack_edit(user_id: str, old_text: str, new_text: str, channel_id: str) -> None:
         user_name = await get_user_name_slack(user_id=user_id, client=slack_side.async_client)
@@ -98,9 +121,9 @@ def main() -> None:
             client=slack_side.async_client,
             dm_fallback_user_name=user_name,
         )
-        old_formatted = f"[From Slack] {user_name}: {old_text}"
-        new_formatted = f"[From Slack] {user_name}: {new_text}"
-        discord_side.schedule_edit_text(old_formatted, new_formatted, channel_name)
+        
+        # Pass old message, new message, and author separately instead of formatted strings
+        discord_side.schedule_edit_text(old_text, new_text, user_name, channel_name)
 
     slack_side.set_on_message(on_slack_message)
     slack_side.set_on_delete(on_slack_delete)

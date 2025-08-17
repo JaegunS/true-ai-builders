@@ -3,6 +3,7 @@ import threading
 from typing import Awaitable, Callable, Optional
 
 import discord
+from utils import is_discord_bot_message
 
 class DiscordHandler:
     """
@@ -21,8 +22,8 @@ class DiscordHandler:
         self.ready_event: threading.Event = threading.Event()
 
         self._on_message_callback: Optional[Callable[[discord.Message, str], Awaitable[None]]] = None
-        self._on_delete_callback: Optional[Callable[[discord.Message, str], Awaitable[None]]] = None
-        self._on_edit_callback: Optional[Callable[[discord.Message, discord.Message, str], Awaitable[None]]] = None
+        self._on_delete_callback: Optional[Callable[[str, str, str], Awaitable[None]]] = None
+        self._on_edit_callback: Optional[Callable[[str, str, str, str], Awaitable[None]]] = None
 
         self._register_events()
 
@@ -35,7 +36,7 @@ class DiscordHandler:
 
         @self.client.event
         async def on_message(message: discord.Message) -> None:  # type: ignore
-            if message.author == self.client.user:
+            if is_discord_bot_message(message):
                 return
             
             channel_name = message.channel.name
@@ -47,7 +48,7 @@ class DiscordHandler:
         async def on_message_delete(message: discord.Message) -> None:  # type: ignore
             # Ignore our own bot's deletions
             try:
-                if message.author == self.client.user:
+                if is_discord_bot_message(message):
                     return
             except Exception:
                 # In rare cases message.author may not be available
@@ -57,20 +58,20 @@ class DiscordHandler:
 
             print(channel_name)
             if self._on_delete_callback is not None:
-                await self._on_delete_callback(message, channel_name)
+                await self._on_delete_callback(message.content, message.author.name, channel_name)
 
         @self.client.event
         async def on_message_edit(before: discord.Message, after: discord.Message) -> None:  # type: ignore
             # Ignore our own bot edits to avoid feedback loops
             try:
-                if after.author == self.client.user:
+                if is_discord_bot_message(after):
                     return
             except Exception:
                 pass
 
             channel_name = getattr(getattr(after, "channel", None), "name", "unknown")
             if self._on_edit_callback is not None:
-                await self._on_edit_callback(before, after, channel_name)
+                await self._on_edit_callback(before.content, after.content, after.author.name, channel_name)
 
 
     # --- Set up callbacks ---
@@ -82,30 +83,81 @@ class DiscordHandler:
         self._on_message_callback = callback
 
     def set_on_delete(
-        self, callback: Callable[[discord.Message, str], Awaitable[None]]
+        self, callback: Callable[[str, str, str], Awaitable[None]]
     ) -> None:
         """Set an async callback invoked when a message is deleted in any channel."""
         self._on_delete_callback = callback
 
     def set_on_edit(
-        self, callback: Callable[[discord.Message, discord.Message, str], Awaitable[None]]
+        self, callback: Callable[[str, str, str, str], Awaitable[None]]
     ) -> None:
         """Set an async callback invoked when a message is edited in any channel."""
         self._on_edit_callback = callback
 
     # --- Set up the actual functions ---
 
-    async def send_text(self, text: str, channel_name: str) -> None:
-        """Send a message to the configured Discord channel."""
+    async def send_text(self, message_content: str, author_name: str, channel_name: str, message_text: str = None) -> None:
+        """
+        Send a message to the configured Discord channel with author attribution.
+        If message_text is provided, send as a reply to that message.
+        """
+
+        if message_text is not None:
+            # If message_text is provided, find the message and reply to it
+            await self.send_reply(message_content, channel_name, message_text, author_name)
+        else:
+            # Send as a new message
+            channel = discord.utils.get(self.client.get_all_channels(), name=channel_name)
+
+            if channel is None:
+                print(f"Channel '{channel_name}' not found; dropping message")
+                return
+            
+            # Format the message with author attribution
+            formatted_message = f"[From Slack] {author_name}: {message_content}"
+            await channel.send(formatted_message)
+
+    async def send_reply(self, reply_text: str, channel_name: str, message_text: str, author_name: str) -> None:
+        """
+        Find a message containing the specified text and send a reply to it.
+        
+        Args:
+            reply_text: The text to send as a reply
+            channel_name: The name of the channel to search in
+            message_text: The text to search for in existing messages
+            author_name: The name of the author sending the reply
+        """
         channel = discord.utils.get(self.client.get_all_channels(), name=channel_name)
 
         if channel is None:
-            print(f"Channel '{channel_name}' not found; dropping message")
+            print(f"Channel '{channel_name}' not found; dropping reply")
             return
-        await channel.send(text)  # type: ignore[arg-type]
 
-    async def delete_text(self, text: str, channel_name: str) -> None:
-        """Delete recent messages in a Discord channel that contain the given text."""
+        if not hasattr(channel, "history"):
+            print(f"Channel '{channel_name}' does not support history; cannot send reply")
+            return
+
+        try:
+            # Handle the [From Discord] prefix if present
+            search_text = message_text
+            if message_text.startswith("[From Discord]"):
+                search_text = "".join(message_text.split(":")[1:]).strip()
+
+            # Search for the message to reply to
+            async for message in channel.history(limit=self.message_read_limit):
+                if search_text in message.content:
+                    # Found the message, send a reply
+                    formatted_reply = f"[From Slack] {author_name}: {reply_text}"
+                    await message.reply(formatted_reply)
+                    return
+
+            print(f"Could not find message to reply to in '{channel_name}'")
+
+        except Exception as e:
+            print(f"Error sending reply in '{channel_name}': {e}")
+
+    async def delete_text(self, message_content: str, author_name: str, channel_name: str) -> None:
+        """Delete recent messages in a Discord channel that match the author and content."""
         channel = discord.utils.get(self.client.get_all_channels(), name=channel_name)
 
         if channel is None:
@@ -118,8 +170,14 @@ class DiscordHandler:
             return
         
         try:
-            async for message in channel.history(limit=self.message_read_limit):  # type: ignore[attr-defined]
-                if text in (getattr(message, "content", "") or ""):
+            async for message in channel.history(limit=self.message_read_limit):
+                content = getattr(message, "content", "") or ""
+                author = getattr(message, "author", None)
+                
+                # Check if message content and author match
+                if (message_content in content and 
+                    author and 
+                    getattr(author, "name", "") == author_name):
                     try:
                         await message.delete()
                         return
@@ -128,8 +186,8 @@ class DiscordHandler:
         except Exception as e:
             print(f"Error fetching history for '{channel_name}': {e}")
 
-    async def edit_text(self, old_text: str, new_text: str, channel_name: str) -> None:
-        """Edit the most recent bot-authored message containing old_text to new_text."""
+    async def edit_text(self, old_message: str, new_message: str, author_name: str, channel_name: str) -> None:
+        """Edit the most recent message from the specified author containing old_message."""
         channel = discord.utils.get(self.client.get_all_channels(), name=channel_name)
 
         if channel is None:
@@ -141,17 +199,17 @@ class DiscordHandler:
             return
 
         try:
-            async for message in channel.history(limit=self.message_read_limit):  # type: ignore[attr-defined]
+            async for message in channel.history(limit=self.message_read_limit):
                 content = getattr(message, "content", "") or ""
-                if old_text in content:
-                    # Only attempt to edit messages authored by this bot
+                author = getattr(message, "author", None)
+                
+                # Check if message content and author match
+                if (old_message in content and 
+                    author and 
+                    getattr(author, "name", "") == author_name):
                     try:
-                        if getattr(message, "author", None) == self.client.user:
-                            await message.edit(content=new_text)
-                            return
-                        else:
-                            # Not our message; skip
-                            pass
+                        await message.edit(content=new_message)
+                        return
                     except Exception as e:
                         print(f"Error editing message in '{channel_name}': {e}")
                     finally:
@@ -161,28 +219,38 @@ class DiscordHandler:
 
     # --- Schedule discord events --- #
 
-    def schedule_send_text(self, text: str, channel_name: str) -> None:
+    def schedule_send_text(self, message_content: str, author_name: str, channel_name: str, message_text: str = None) -> None:
         """
         Schedule sending a message to Discord from another thread.
+        If message_text is provided, send as a reply to that message.
         """
         if self.loop is None:
             print("Discord event loop not ready; dropping message")
             return
-        asyncio.run_coroutine_threadsafe(self.send_text(text, channel_name), self.loop)
+        asyncio.run_coroutine_threadsafe(self.send_text(message_content, author_name, channel_name, message_text), self.loop)
 
-    def schedule_delete_text(self, text: str, channel_name: str) -> None:
+    def schedule_send_reply(self, reply_text: str, channel_name: str, message_text: str, author_name: str) -> None:
+        """
+        Schedule sending a reply to Discord from another thread.
+        """
+        if self.loop is None:
+            print("Discord event loop not ready; dropping reply")
+            return
+        asyncio.run_coroutine_threadsafe(self.send_reply(reply_text, channel_name, message_text, author_name), self.loop)
+
+    def schedule_delete_text(self, message_content: str, author_name: str, channel_name: str) -> None:
         """Schedule deletion of a message from another thread."""
         if self.loop is None:
             print("Discord event loop not ready; cannot delete message")
             return
-        asyncio.run_coroutine_threadsafe(self.delete_text(text, channel_name), self.loop)
+        asyncio.run_coroutine_threadsafe(self.delete_text(message_content, author_name, channel_name), self.loop)
 
-    def schedule_edit_text(self, old_text: str, new_text: str, channel_name: str) -> None:
+    def schedule_edit_text(self, old_message: str, new_message: str, author_name: str, channel_name: str) -> None:
         """Schedule editing of a message from another thread."""
         if self.loop is None:
             print("Discord event loop not ready; cannot edit message")
             return
-        asyncio.run_coroutine_threadsafe(self.edit_text(old_text, new_text, channel_name), self.loop)
+        asyncio.run_coroutine_threadsafe(self.edit_text(old_message, new_message, author_name, channel_name), self.loop)
 
     def run(self) -> None:
         """Run the Discord client (blocking)."""
