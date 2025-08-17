@@ -44,9 +44,8 @@ def main() -> None:
         author_name = message.author.name
         content = message.content
         slack_message_text = f"[From Discord] {author_name}: {content}"
+        # Check if it is a reply
         await slack_side.send_text(slack_message_text, channel_name)
-
-    discord_side.set_on_message(on_discord_message)
 
     # Bridge: Discord -> Slack (delete)
     async def on_discord_delete(message: discord.Message, channel_name: str) -> None:
@@ -56,9 +55,6 @@ def main() -> None:
         slack_message_text = f"[From Discord] {author_name}: {content}"
         await slack_side.delete_text(slack_message_text, channel_name)
 
-
-    discord_side.set_on_delete(on_discord_delete)
-
     # Bridge: Discord -> Slack (edit)
     async def on_discord_edit(before: discord.Message, after: discord.Message, channel_name: str) -> None:
         author_name = after.author.name
@@ -66,6 +62,8 @@ def main() -> None:
         new_formatted = f"[From Discord] {author_name}: {after.content}"
         await slack_side.edit_text(old_formatted, new_formatted, channel_name)
 
+    discord_side.set_on_message(on_discord_message)
+    discord_side.set_on_delete(on_discord_delete)
     discord_side.set_on_edit(on_discord_edit)
 
     # Bridge: Slack -> Discord
@@ -77,10 +75,8 @@ def main() -> None:
             dm_fallback_user_name=user_name,
         )
         formatted = f"[From Slack] {user_name}: {text}"
+        # Check if it is a reply
         discord_side.schedule_send_text(formatted, channel_name=channel_name)
-
-
-    slack_side.set_on_message(on_slack_message)
 
     async def on_slack_delete(user_id: str, text: str, channel_id: str) -> None:
         user_name = await get_user_name_slack(user_id=user_id, client=slack_side.async_client)
@@ -95,8 +91,6 @@ def main() -> None:
 
         discord_side.schedule_delete_text(discord_message_text, channel_name)
 
-    slack_side.set_on_delete(on_slack_delete)
-
     async def on_slack_edit(user_id: str, old_text: str, new_text: str, channel_id: str) -> None:
         user_name = await get_user_name_slack(user_id=user_id, client=slack_side.async_client)
         channel_name = await get_channel_name_slack(
@@ -108,6 +102,8 @@ def main() -> None:
         new_formatted = f"[From Slack] {user_name}: {new_text}"
         discord_side.schedule_edit_text(old_formatted, new_formatted, channel_name)
 
+    slack_side.set_on_message(on_slack_message)
+    slack_side.set_on_delete(on_slack_delete)
     slack_side.set_on_edit(on_slack_edit)
 
     # Start Slack Socket Mode after Discord is ready
